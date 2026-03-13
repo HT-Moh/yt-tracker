@@ -54,8 +54,8 @@ PATH="$HOME/.deno/bin:$PATH" GROQ_API_KEY="$GROQ_KEY" python3 yt-preload.py -o /
 發送方式：`message` tool
 - channel: telegram
 - accountId: bird
-- target: -1003767828002
-- threadId: 36
+- target: ${TELEGRAM_CHAT_ID}
+- threadId: ${TELEGRAM_THREAD_ID}
 
 ### Step 5 — 更新狀態
 
