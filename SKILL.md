@@ -29,16 +29,33 @@ python3 yt-check-new.py --frequency hourly
 
 對每部新影片：
 
-**① web_search**（1次）：搜尋 `{影片標題} {頻道名} site:youtube.com OR {講者名}` 取得背景
-**② 整合寫出 2-3 行重點**：這支影片是誰、講什麼、為什麼值得看
-**③ 嘗試 yt-dlp 字幕**（可選，若 30 秒內無字幕則跳過）：
+**① 嘗試取得字幕/轉錄**（必做，這是判斷是否推送的門檻）：
 
 ```bash
-timeout 30 yt-dlp --write-auto-sub --sub-lang en --skip-download \
-  --output "/tmp/%(id)s" "https://www.youtube.com/watch?v={videoId}" 2>/dev/null
+# 先試 yt-dlp 字幕（含中文和英文）
+timeout 30 yt-dlp --write-auto-sub --sub-lang zh-Hant,zh-Hans,en --skip-download \
+  --output "/tmp/%(id)s" "https://www.youtube.com/watch?v={videoId}" 2>&1
 ```
 
-若有字幕，取前 1500 字補充核心觀點。
+若字幕失敗，改用 Groq Whisper 轉錄：
+```bash
+GROQ_KEY=$(python3 -c "import json; print(json.load(open('/home/node/.openclaw/agents/bird/agent/secrets/groq.json'))['GROQ_API_KEY'])")
+timeout 60 yt-dlp -f "bestaudio[filesize<20M]" \
+  --output "/tmp/%(id)s.%(ext)s" "https://www.youtube.com/watch?v={videoId}" 2>&1
+# 若下載成功，用 curl 呼叫 Groq：
+curl -s -X POST https://api.groq.com/openai/v1/audio/transcriptions \
+  -H "Authorization: Bearer $GROQ_KEY" \
+  -F "file=@/tmp/{videoId}.webm" \
+  -F "model=whisper-large-v3-turbo" \
+  -F "language=zh" \
+  -F "response_format=text"
+```
+
+> ⚠️ **無法取得任何內容時（字幕和轉錄都失敗）→ 直接略過這支影片，但仍更新 state 標記為已見。不發 Telegram 通知。** 這包含真正的會員限定影片、地區限制、或任何無法存取的影片。
+
+**② web_search**（1次，僅在有字幕/轉錄內容後才做）：搜尋 `{影片標題} {頻道名}` 取得補充背景
+
+**③ 整合摘要**：結合轉錄內容 + web_search，寫出有實質內容的摘要
 
 **發送格式：**
 ```

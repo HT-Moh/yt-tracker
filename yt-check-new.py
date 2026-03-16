@@ -74,10 +74,13 @@ def fetch_via_ytdlp(channel_id: str, handle: str = "") -> list[dict]:
                 continue
             try:
                 d = json.loads(line)
+                availability = d.get("availability", "") or ""
+                members_only = availability.lower() in ("subscriber_only", "needs_auth", "premium")
                 entries.append({
                     "videoId": d.get("id", ""),
                     "title": d.get("title", ""),
                     "published": "",
+                    **({"membersOnly": True} if members_only else {}),
                 })
             except json.JSONDecodeError:
                 pass
@@ -87,6 +90,54 @@ def fetch_via_ytdlp(channel_id: str, handle: str = "") -> list[dict]:
     except Exception as e:
         print(f"WARNING: yt-dlp failed for {handle or channel_id}: {e}", file=sys.stderr)
         return []
+
+
+STATE_EXPIRY_DAYS = 30
+
+
+def prune_old_state(state: dict) -> tuple[dict, int]:
+    """Remove entries older than STATE_EXPIRY_DAYS from lastNotifiedAt and lastSeenVideoIds.
+    Returns (updated_state, pruned_count)."""
+    from datetime import datetime, timezone, timedelta
+    cutoff = datetime.now(timezone.utc) - timedelta(days=STATE_EXPIRY_DAYS)
+    pruned = 0
+
+    for cid, ch_state in state.get("channels", {}).items():
+        lna = ch_state.get("lastNotifiedAt", {})
+        expired_ids: set[str] = set()
+        for vid_id, ts_str in list(lna.items()):
+            try:
+                ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                if ts < cutoff:
+                    expired_ids.add(vid_id)
+                    del lna[vid_id]
+                    pruned += 1
+            except (ValueError, TypeError):
+                pass
+
+        if expired_ids:
+            ch_state["lastSeenVideoIds"] = [
+                v for v in ch_state.get("lastSeenVideoIds", []) if v not in expired_ids
+            ]
+
+    # Prune top-level lastNotifiedAt
+    top_lna = state.get("lastNotifiedAt", {})
+    for vid_id, ts_str in list(top_lna.items()):
+        try:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            if ts < cutoff:
+                del top_lna[vid_id]
+                pruned += 1
+        except (ValueError, TypeError):
+            pass
+
+    # Prune top-level lastSeenVideoIds (keep only recent ones still in any channel's lastNotifiedAt)
+    all_notified: set[str] = set()
+    for ch_state in state.get("channels", {}).values():
+        all_notified.update(ch_state.get("lastNotifiedAt", {}).keys())
+    state["lastSeenVideoIds"] = [v for v in state.get("lastSeenVideoIds", []) if v in all_notified]
+
+    return state, pruned
 
 
 def main():
@@ -100,6 +151,12 @@ def main():
         sys.exit(1)
 
     state = json.loads(STATE_FILE.read_text())
+
+    # Prune expired state entries (>30 days)
+    state, pruned_count = prune_old_state(state)
+    if pruned_count > 0:
+        print(f"INFO: Pruned {pruned_count} expired state entries (>{STATE_EXPIRY_DAYS}d)", file=sys.stderr)
+        STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2))
 
     # Load channel list from yt-channels.json (user-editable)
     # Falls back to state file channels if yt-channels.json doesn't exist
