@@ -38,7 +38,14 @@ python3 yt-check-new.py --frequency hourly
 
 對每部新影片：
 
-**① 會員限定早期偵測**：若 yt-dlp 輸出含 `members-only` 或 `This video is available to this channel's members` → 立即標記為已見，**跳過所有後續步驟，不發通知**。不需嘗試 Groq 或 YouTube API。
+**① 會員限定早期偵測**：若 yt-dlp 輸出含 `members-only` 或 `This video is available to this channel's members` → 立即標記為已見（加入 `lastSeenVideoIds`，**不加入** `lastNotifiedAt`），**跳過所有後續步驟，不發通知**。不需嘗試 Groq 或 YouTube API。
+
+> 📝 **會員限定影片的特殊處理**：
+> - 加入 `membersOnlyIds`（避免每次 RSS 掃到都重複檢查）
+> - 加入 `lastSeenVideoIds`（去重紀錄）
+> - **不加入** `lastNotifiedAt`（保留開放後被偵測的可能）
+>
+> `yt-check-new.py` 會自動跳過 `membersOnlyIds` 中的影片。**自動畢業機制**：每次 RSS 掃描時，若 `membersOnlyIds` 中的影片出現在 RSS 且不再有 `membersOnly` 標記，自動從 `membersOnlyIds` 移除，並在本次 run 中當作新影片處理推送。
 
 **② 嘗試取得字幕/轉錄**（必做，這是判斷是否推送的門檻）：
 

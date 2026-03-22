@@ -220,10 +220,36 @@ def main():
 
     # Compare against state — use lastNotifiedAt keys as ground truth
     # (lastSeenVideoIds is unreliable: yt-dlp fallback may bulk-add unsent videos)
+    # membersOnlyIds: videos confirmed members-only — skip until they go public
+    # Auto-graduate: if a membersOnly video now appears in RSS without membersOnly flag, treat as newly public
     new_videos = {}
     for cid, entries in results.items():
         notified = set(channels.get(cid, {}).get("lastNotifiedAt", {}).keys())
-        new_entries = [e for e in entries if e["videoId"] not in notified]
+        members_only_ids = channels.get(cid, {}).get("membersOnlyIds", [])
+        members_only = set(members_only_ids)
+        rss_ids = {e["videoId"] for e in entries}
+
+        # Check if any membersOnly video is now public (in RSS and not flagged as membersOnly)
+        newly_public = []
+        for vid in list(members_only_ids):
+            if vid in rss_ids:
+                matching = next((e for e in entries if e["videoId"] == vid), None)
+                if matching and not matching.get("membersOnly"):
+                    print(f"INFO: {vid} graduated from members-only to public!", file=sys.stderr)
+                    newly_public.append(vid)
+                    members_only.discard(vid)
+
+        if newly_public:
+            # Update state: remove from membersOnlyIds
+            state_ch = state["channels"].get(cid, {})
+            state_ch["membersOnlyIds"] = [v for v in state_ch.get("membersOnlyIds", []) if v not in newly_public]
+            state["channels"][cid] = state_ch
+            STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2))
+
+        new_entries = [
+            e for e in entries
+            if e["videoId"] not in notified and e["videoId"] not in members_only
+        ]
         if new_entries:
             new_videos[cid] = {
                 "name": channels.get(cid, {}).get("name", cid),
