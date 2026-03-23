@@ -2,25 +2,6 @@
 
 YouTube 頻道監控與分析推送。
 
-## 🎯 Gemini 影片分析（優先使用）
-
-所有影片分析**優先使用 Gemini 2.5 Flash**，直接給 YouTube URL，免下載、免轉錄：
-
-```bash
-python3 /home/node/.openclaw/workspace/projects/yt-tracker/gemini-analyze.py \
-  --url "https://youtube.com/watch?v={videoId}" --mode hourly --json
-```
-
-- `--mode hourly`：簡潔摘要（~200 字）
-- `--mode daily`：深度批判性分析（300-500 字，含立場偏差、邏輯漏洞、缺失觀點）
-
-**Fallback 順序：**
-1. ✅ Gemini 2.5 Flash（免下載，直接分析影片）
-2. 🔄 yt-dlp 字幕 + Groq Whisper（Gemini 失敗時）
-3. 🔄 YouTube Data API 描述文字（都失敗時）
-
-若 Gemini 回傳錯誤（429 rate limit / API key 問題），才回退到舊的 yt-dlp + Whisper 流程。
-
 ## 🔍 Search Fallback
 
 If `web_search` is unavailable or returns errors (quota exhausted, rate limited):
@@ -77,28 +58,20 @@ python3 yt-check-new.py --frequency hourly
 >
 > `yt-check-new.py` 會自動跳過 `membersOnlyIds` 中的影片。**自動畢業機制**：每次 RSS 掃描時，若 `membersOnlyIds` 中的影片出現在 RSS 且不再有 `membersOnly` 標記，自動從 `membersOnlyIds` 移除，並在本次 run 中當作新影片處理推送。
 
-**② Gemini 影片分析**（優先，免下載）：
+**② 嘗試取得字幕/轉錄**（必做，這是判斷是否推送的門檻）：
 
 ```bash
-python3 /home/node/.openclaw/workspace/projects/yt-tracker/gemini-analyze.py \
-  --url "https://youtube.com/watch?v={videoId}" --mode hourly --json
-```
-
-解析 JSON 回傳的 `analysis` 欄位。若 `success: true` → 直接用 Gemini 分析結果，跳到 ③。
-
-**Gemini 失敗時的 Fallback**（依序嘗試）：
-
-a. yt-dlp 字幕：
-```bash
+# 先試 yt-dlp 字幕（含中文和英文）
 timeout 30 yt-dlp --write-auto-sub --sub-lang zh-Hant,zh-Hans,en --skip-download \
   --output "/tmp/%(id)s" "https://www.youtube.com/watch?v={videoId}" 2>&1
 ```
 
-b. Groq Whisper 轉錄：
+若字幕失敗，改用 Groq Whisper 轉錄：
 ```bash
 GROQ_KEY=$(python3 -c "import json; print(json.load(open('/home/node/.openclaw/agents/bird/agent/secrets/groq.json'))['GROQ_API_KEY'])")
 timeout 60 yt-dlp -f "bestaudio[filesize<20M]" \
   --output "/tmp/%(id)s.%(ext)s" "https://www.youtube.com/watch?v={videoId}" 2>&1
+# 若下載成功，用 curl 呼叫 Groq：
 curl -s -X POST https://api.groq.com/openai/v1/audio/transcriptions \
   -H "Authorization: Bearer $GROQ_KEY" \
   -F "file=@/tmp/{videoId}.webm" \
@@ -107,13 +80,17 @@ curl -s -X POST https://api.groq.com/openai/v1/audio/transcriptions \
   -F "response_format=text"
 ```
 
-c. YouTube Data API 描述文字（最後手段）
+> ⚠️ **字幕和轉錄都失敗時 → 嘗試 YouTube Data API fallback**：
+> ```bash
+> YT_KEY=$(python3 -c "import json; print(json.load(open('/home/node/.openclaw/agents/bird/agent/secrets/youtube.json'))['YOUTUBE_API_KEY'])" 2>/dev/null || echo "")
+> # 若有 API key，抓影片描述當內容基礎：
+> curl -s "https://www.googleapis.com/youtube/v3/videos?id={videoId}&part=snippet&key=$YT_KEY" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['items'][0]['snippet']['description'])" 2>/dev/null
+> ```
+> 若 API 也失敗（或無 key）→ 直接略過這支影片，但仍更新 state 標記為已見。不發 Telegram 通知。這包含真正的會員限定影片、地區限制、或任何無法存取的影片。
 
-> 若全部失敗 → 略過影片，更新 state 標記已見，不發通知。
+**② web_search**（1次，僅在有字幕/轉錄內容後才做）：搜尋 `{影片標題} {頻道名}` 取得補充背景（若 web_search 失敗，改用 smart_search.py —— 見上方 Search Fallback）
 
-**② web_search 補充**（Gemini 成功時可選做，失敗 fallback 時必做）：搜尋 `{影片標題} {頻道名}` 取得補充背景（若 web_search 失敗，改用 smart_search.py —— 見上方 Search Fallback）
-
-**③ 整合摘要**：使用 Gemini 分析結果（或 fallback 的轉錄 + web_search），寫出有實質內容的摘要
+**③ 整合摘要**：結合轉錄內容 + web_search，寫出有實質內容的摘要
 
 **發送格式：**
 ```
@@ -202,24 +179,15 @@ print(' '.join(lines))
 
 對每部影片：
 
-1. **Gemini 深度分析**（優先）：
-```bash
-python3 /home/node/.openclaw/workspace/projects/yt-tracker/gemini-analyze.py \
-  --url "https://youtube.com/watch?v={videoId}" --mode daily --json
-```
-Gemini daily 模式會自動產出批判性分析（立場偏差、邏輯漏洞、缺失觀點等）。
-
-若 Gemini 失敗 → fallback 讀取 Step 3 的 transcript 自行分析。
-
+1. **深度分析**：讀取完整 transcript，找出核心論點、數據、觀點
 2. **外部驗證**：跑 **2-3 次** `web_search`（若 web_search 失敗，改用 smart_search.py —— 見上方 Search Fallback）
    - 搜尋影片標題 + 講者名 → 確認影片背景
    - 搜尋影片中提到的關鍵事件/數據 → 交叉驗證
-3. **綜合撰寫**（300-500 字元），融合 Gemini 分析 + 外部驗證：
+3. **綜合撰寫**（300-500 字元）：
    - 📌 核心論點
    - 📊 關鍵數據（附外部驗證來源）
-   - 🔍 批判性觀點（立場偏差、邏輯漏洞、缺失觀點）
    - 💡 投資/科技啟示
-   - ⚖️ 評價（1-5 ⭐）
+   - ⚖️ 評價
 
 ### Step 5 — 推送 Telegram
 
