@@ -88,7 +88,7 @@ def analyze_video(youtube_url: str, mode: str = "hourly") -> dict:
         ],
         "generationConfig": {
             "temperature": 0.3,
-            "maxOutputTokens": 2048,
+            "maxOutputTokens": 4096,
         }
     }
 
